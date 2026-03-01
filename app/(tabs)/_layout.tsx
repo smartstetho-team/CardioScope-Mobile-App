@@ -1,6 +1,6 @@
 import { Tabs } from 'expo-router'
 import React from 'react'
-import { Ionicons } from '@expo/vector-icons' // Standard with Expo
+import { Ionicons } from '@expo/vector-icons'
 import { Colors } from '@/constants/theme'
 import { useColorScheme } from '@/hooks/use-color-scheme'
 
@@ -12,18 +12,28 @@ export default function TabLayout() {
       screenOptions={{
         tabBarActiveTintColor: Colors[colorScheme ?? 'light'].tint,
         headerShown: false,
-        // Removed tabBarButton: HapticTab to stop the crash
       }}
     >
       <Tabs.Screen
         name='index'
         options={{
-          title: 'Home',
+          title: 'Monitor',
           tabBarIcon: ({ color }) => (
-            <Ionicons size={28} name='home' color={color} />
+            <Ionicons size={28} name='pulse' color={color} />
           ),
         }}
       />
+
+      <Tabs.Screen
+        name='history'
+        options={{
+          title: 'History',
+          tabBarIcon: ({ color }) => (
+            <Ionicons size={28} name='time' color={color} />
+          ),
+        }}
+      />
+
       <Tabs.Screen
         name='settings'
         options={{

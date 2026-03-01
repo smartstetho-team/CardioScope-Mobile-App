@@ -22,6 +22,7 @@ import Svg, { Path } from 'react-native-svg'
 import { getManager } from '@/utils/ble-manager'
 import { Buffer } from 'buffer'
 import * as DocumentPicker from 'expo-document-picker'
+import { initDatabase, saveRecord } from '@/utils/database'
 
 global.Buffer = Buffer
 
@@ -135,7 +136,6 @@ function Phonocardiogram({ audioBuffer }: { audioBuffer: Buffer | null }) {
   )
 }
 
-// --- ML RUNNER ---
 const softmax = (logits: number[]) => {
   const maxLogit = Math.max(...logits)
   const scores = logits.map((l) => Math.exp(l - maxLogit))
@@ -144,7 +144,6 @@ const softmax = (logits: number[]) => {
 }
 
 const runInference = async (audioData: Int16Array) => {
-  console.log('[ML LOG] Starting runInference...')
   try {
     const modelAsset = Asset.fromModule(
       require('../../assets/models/best_multiclass.onnx'),
@@ -153,7 +152,6 @@ const runInference = async (audioData: Int16Array) => {
       require('../../assets/models/best_multiclass.onnx.data'),
     )
     await Promise.all([modelAsset.downloadAsync(), dataAsset.downloadAsync()])
-
     const modelDir = `${FileSystem.documentDirectory}ml_model/`
     await FileSystem.makeDirectoryAsync(modelDir, { intermediates: true })
     const modelFilePath = `${modelDir}best_multiclass.onnx`
@@ -163,35 +161,22 @@ const runInference = async (audioData: Int16Array) => {
       to: modelFilePath,
     })
     await FileSystem.copyAsync({ from: dataAsset.localUri!, to: dataFilePath })
-
-    console.log('[ML LOG] Loading ONNX session...')
     const session = await InferenceSession.create(modelFilePath)
-
     const TARGET_LENGTH = 32000
     const float32Data = new Float32Array(TARGET_LENGTH)
-    for (let i = 0; i < TARGET_LENGTH; i++) {
+    for (let i = 0; i < TARGET_LENGTH; i++)
       float32Data[i] = i < audioData.length ? audioData[i] / 32768.0 : 0
-    }
-
     const inputTensor = new Tensor('float32', float32Data, [
       1,
       1,
       TARGET_LENGTH,
     ])
-    console.log('[ML LOG] Running Model...')
     const outputs = await session.run({ [session.inputNames[0]]: inputTensor })
-
-    const rawLogits = Array.from(
-      outputs[session.outputNames[0]].data as Float32Array,
+    return softmax(
+      Array.from(outputs[session.outputNames[0]].data as Float32Array),
     )
-    console.log('[ML LOG] Raw Logits:', rawLogits)
-
-    const resultProbs = softmax(rawLogits)
-    console.log('[ML LOG] Softmax Probabilities:', resultProbs)
-
-    return resultProbs
   } catch (e) {
-    console.error('[ML LOG] Inference Failed:', e)
+    console.error('ML Inference Failed:', e)
     return null
   }
 }
@@ -199,7 +184,11 @@ const runInference = async (audioData: Int16Array) => {
 export default function Index() {
   const [recordedBPM, setRecordedBPM] = useState<number>(0)
   const [status, setStatus] = useState('Disconnected')
+  const statusRef = useRef('Disconnected')
+  const bpmRef = useRef(0)
+
   const [connectedDevice, setConnectedDevice] = useState<any>(null)
+  const [rssi, setRssi] = useState<number | null>(null)
   const [audioUri, setAudioUri] = useState<string | null>(null)
   const [isFilteredMode, setIsFilteredMode] = useState(true)
   const rawAudioUri = useRef<string | null>(null)
@@ -216,6 +205,63 @@ export default function Index() {
   const fullAudioData = useRef<Buffer>(Buffer.alloc(0))
   const localByteCount = useRef(0)
   const [mlResults, setMlResults] = useState<number[] | null>(null)
+  const [isScanning, setIsScanning] = useState(false)
+
+  const getSignalColor = (db: number | null) => {
+    if (!db) return '#ccc'
+    if (db > -60) return '#2ecc71'
+    if (db > -80) return '#f1c40f'
+    return '#e74c3c'
+  }
+
+  const connectHardware = async () => {
+    const manager = getManager()
+    if (isScanning || connectedDevice) return
+    setIsScanning(true)
+    setStatus('Searching...')
+    manager.startDeviceScan(
+      [STETHO_SERVICE_UUID],
+      null,
+      async (error, device) => {
+        if (error) {
+          setIsScanning(false)
+          setStatus('BLE Error')
+          return
+        }
+        if (device) {
+          manager.stopDeviceScan()
+          setIsScanning(false)
+          setStatus('Connecting...')
+          try {
+            const connected = await device.connect()
+            await connected.discoverAllServicesAndCharacteristics()
+            setConnectedDevice(connected)
+            setStatus('Linked')
+            statusRef.current = 'Linked'
+          } catch (e) {
+            setStatus('Retry...')
+          }
+        }
+      },
+    )
+  }
+
+  useEffect(() => {
+    initDatabase()
+    let rssiInterval: NodeJS.Timeout
+    if (connectedDevice) {
+      rssiInterval = setInterval(async () => {
+        try {
+          const updatedDevice = await connectedDevice.readRSSI()
+          setRssi(updatedDevice.rssi)
+        } catch (e) {}
+      }, 3000)
+    }
+    return () => {
+      if (rssiInterval) clearInterval(rssiInterval)
+      getManager().stopDeviceScan()
+    }
+  }, [connectedDevice])
 
   const onPlaybackStatusUpdate = (s: AVPlaybackStatus) => {
     if (s.isLoaded) {
@@ -247,7 +293,6 @@ export default function Index() {
   }
 
   const finalizeAudio = async () => {
-    console.log('[APP LOG] Starting audio finalization...')
     try {
       if (soundRef.current) await soundRef.current.unloadAsync()
       const rawData = fullAudioData.current.slice(0, EXPECTED_SIZE)
@@ -283,32 +328,34 @@ export default function Index() {
       filteredAudioUri.current = filteredPath
       filteredAudioBuffer.current = filteredBuffer
 
-      const cleanStatus = status.trim()
-      console.log(
-        `[APP LOG] Audio saved. Trimmed status for ML check: "${cleanStatus}"`,
-      )
+      const finalStatus = statusRef.current.trim()
+      const finalBPM = bpmRef.current
+      let resultsToSave = null
 
-      // RUN ML BEFORE CLOSING MODAL
-      if (cleanStatus === '1') {
-        console.log("[APP LOG] Status matches '1'. Triggering ML analysis...")
-        setUiMessage('Running AI Diagnostics...')
+      if (finalStatus === '1') {
+        setUiMessage('Classifying Murmur...')
         const results = await runInference(filteredSamples)
         if (results) {
-          console.log('[APP LOG] ML finished. Updating state.')
           setMlResults(results)
-        } else {
-          console.warn('[APP LOG] ML returned null.')
+          resultsToSave = results
         }
       } else {
-        console.log("[APP LOG] Status is not '1'. Clearing diagnosis card.")
         setMlResults(null)
       }
 
       setAudioUri(isFilteredMode ? filteredPath : rawPath)
+
+      saveRecord({
+        bpm: finalBPM,
+        status: finalStatus,
+        audioUri: isFilteredMode ? filteredPath : rawPath,
+        earlyMurmur: resultsToSave ? resultsToSave[0] : 0,
+        holosystolic: resultsToSave ? resultsToSave[1] : 0,
+        midLateMurmur: resultsToSave ? resultsToSave[2] : 0,
+      })
     } catch (err) {
-      console.error('[APP LOG] Finalize Error:', err)
+      console.error('Finalize Error:', err)
     } finally {
-      console.log('[APP LOG] Closing modal and cleaning up.')
       setIsTransferring(false)
       setProgress(0)
       localByteCount.current = 0
@@ -319,6 +366,7 @@ export default function Index() {
   const createWavHeader = (dataLength: number, sampleRate: number) => {
     const header = Buffer.alloc(44)
     header.write('RIFF', 0)
+    // FIXED: Using standard writeUInt32LE
     header.writeUInt32LE(36 + dataLength, 4)
     header.write('WAVE', 8)
     header.write('fmt ', 12)
@@ -337,7 +385,6 @@ export default function Index() {
   const startMonitoring = async () => {
     if (!connectedDevice) return
     try {
-      setStatus('Linked')
       await connectedDevice.discoverAllServicesAndCharacteristics()
       connectedDevice.monitorCharacteristicForService(
         STETHO_SERVICE_UUID,
@@ -345,31 +392,29 @@ export default function Index() {
         (err, char) => {
           if (err || !char?.value) return
           const chunk = Buffer.from(char.value, 'base64')
-
           if (chunk[0] === 0xfe && chunk.length < 5) {
             setIsTransferring(true)
             setUiMessage('Syncing Hardware...')
             localByteCount.current = 0
             fullAudioData.current = Buffer.alloc(0)
             setAudioUri(null)
-            setMlResults(null) // Reset old results
+            setMlResults(null)
+            statusRef.current = 'Linked'
+            bpmRef.current = 0
             return
           }
-
           if (chunk[0] === 0xff && chunk.length < 10) {
             const rawStatus = chunk[1].toString()
-            console.log(
-              `[BLE LOG] Handshake FF received. Raw Status: ${rawStatus}`,
-            )
+            const rawBPM = chunk[2]
+            statusRef.current = rawStatus
+            bpmRef.current = rawBPM
             setStatus(rawStatus)
-            setRecordedBPM(chunk[2])
+            setRecordedBPM(rawBPM)
             return
           }
-
           fullAudioData.current = Buffer.concat([fullAudioData.current, chunk])
           localByteCount.current += chunk.length
           setProgress(Math.min(localByteCount.current / EXPECTED_SIZE, 1))
-
           if (localByteCount.current >= EXPECTED_SIZE) {
             finalizeAudio()
           }
@@ -382,20 +427,6 @@ export default function Index() {
   }
 
   useEffect(() => {
-    const manager = getManager()
-    const timer = setInterval(async () => {
-      const devices = await manager.connectedDevices(['180d'])
-      if (devices.length > 0) {
-        if (!connectedDevice) setConnectedDevice(devices[0])
-      } else {
-        setConnectedDevice(null)
-        setStatus('Searching...')
-      }
-    }, 2000)
-    return () => clearInterval(timer)
-  }, [connectedDevice])
-
-  useEffect(() => {
     if (connectedDevice) startMonitoring()
   }, [connectedDevice])
 
@@ -405,8 +436,9 @@ export default function Index() {
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
             <ActivityIndicator size='large' color='#3498db' />
-            <Text style={styles.modalTitle}>StethoSync</Text>
+            <Text style={styles.modalTitle}>Processing Recording</Text>
             <Text style={styles.modalSubtitle}>{uiMessage}</Text>
+            {/* FIXED: View instead of div */}
             <View style={styles.modalProgressContainer}>
               <View
                 style={[
@@ -423,19 +455,55 @@ export default function Index() {
       </Modal>
 
       <View style={styles.header}>
-        <Text style={styles.title}>CardioScope</Text>
-        <Text
-          style={[
-            styles.subtitle,
-            { color: connectedDevice ? '#3498db' : '#FF3B30' },
-          ]}
-        >
-          {status.trim() === '1'
-            ? 'Abnormal Detected'
-            : status.trim() === '0'
-              ? 'Normal Detected'
-              : status}
-        </Text>
+        <View style={styles.headerRow}>
+          <View>
+            <Text style={styles.title}>CardioScope</Text>
+            <Text
+              style={[
+                styles.subtitle,
+                { color: connectedDevice ? '#3498db' : '#FF3B30' },
+              ]}
+            >
+              {status.trim() === '1'
+                ? 'Abnormal Detected'
+                : status.trim() === '0'
+                  ? 'Normal Detected'
+                  : status}
+            </Text>
+          </View>
+          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {!connectedDevice && (
+              <TouchableOpacity
+                onPress={connectHardware}
+                style={styles.connectButton}
+              >
+                <Ionicons name='bluetooth' size={16} color='#FFF' />
+                <Text style={styles.connectButtonText}>
+                  {isScanning ? 'Scanning' : 'Connect'}
+                </Text>
+              </TouchableOpacity>
+            )}
+            {connectedDevice && (
+              <View
+                style={[
+                  styles.signalBadge,
+                  { borderColor: getSignalColor(rssi) },
+                ]}
+              >
+                <Ionicons
+                  name='bluetooth'
+                  size={14}
+                  color={getSignalColor(rssi)}
+                />
+                <Text
+                  style={[styles.signalText, { color: getSignalColor(rssi) }]}
+                >
+                  {rssi || '--'} dBm
+                </Text>
+              </View>
+            )}
+          </View>
+        </View>
       </View>
 
       <ScrollView style={styles.dashboard}>
@@ -548,7 +616,7 @@ export default function Index() {
             <View style={{ paddingVertical: 40, alignItems: 'center' }}>
               <Ionicons name='mic-circle' size={64} color='#222' />
               <Text style={styles.placeholder}>
-                Press physical button on stethoscope...
+                Waiting for stethoscope signal...
               </Text>
             </View>
           )}
@@ -556,7 +624,6 @@ export default function Index() {
 
         {audioUri && !isTransferring && (
           <View>
-            {/* DIAGNOSIS RESULTS CARD */}
             {status.trim() === '1' && mlResults ? (
               <View style={styles.mlResultsCard}>
                 <Text style={styles.cardTitle}>Detailed Triage Results</Text>
@@ -681,8 +748,38 @@ export default function Index() {
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#FFF' },
   header: { paddingHorizontal: 25, paddingTop: 20 },
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
   title: { fontSize: 32, fontWeight: '900' },
   subtitle: { fontSize: 13, fontWeight: 'bold', textTransform: 'uppercase' },
+  connectButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#3498db',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+    marginTop: 5,
+  },
+  connectButtonText: {
+    color: '#FFF',
+    fontSize: 12,
+    fontWeight: 'bold',
+    marginLeft: 6,
+  },
+  signalBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    marginTop: 5,
+  },
+  signalText: { fontSize: 10, fontWeight: 'bold', marginLeft: 4 },
   dashboard: { padding: 20 },
   darkCard: {
     backgroundColor: '#000',
