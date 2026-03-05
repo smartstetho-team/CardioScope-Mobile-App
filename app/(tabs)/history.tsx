@@ -23,10 +23,13 @@ export default function HistoryScreen() {
   const [searchQuery, setSearchQuery] = useState('')
   const [filterAbnormal, setFilterAbnormal] = useState(false)
   const [selectedId, setSelectedId] = useState<number | null>(null)
+
+  // Audio Playback States
   const [sound, setSound] = useState<Audio.Sound | null>(null)
   const [isPlayingId, setIsPlayingId] = useState<number | null>(null)
   const [playbackPosition, setPlaybackPosition] = useState(0)
   const [playbackDuration, setPlaybackDuration] = useState(0)
+
   const isFocused = useIsFocused()
 
   useEffect(() => {
@@ -60,20 +63,6 @@ export default function HistoryScreen() {
     setFilteredRecords(filtered)
   }
 
-  const handleClearAll = () => {
-    Alert.alert('Clear History', 'Permanently delete all recordings?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Clear All',
-        style: 'destructive',
-        onPress: () => {
-          records.forEach((r) => deleteRecord(r.id))
-          loadData()
-        },
-      },
-    ])
-  }
-
   const stopSound = async () => {
     if (sound) {
       await sound.unloadAsync()
@@ -103,8 +92,35 @@ export default function HistoryScreen() {
       setSound(newSound)
       setIsPlayingId(item.id)
     } catch (e) {
-      Alert.alert('Error', 'File missing.')
+      Alert.alert('Error', 'Audio file not found.')
     }
+  }
+
+  const handleShare = async (uri: string) => {
+    const isAvailable = await Sharing.isAvailableAsync()
+    if (!isAvailable) {
+      Alert.alert('Error', 'Sharing is not available on this device')
+      return
+    }
+    try {
+      await Sharing.shareAsync(uri)
+    } catch (error) {
+      console.error('Sharing failed', error)
+    }
+  }
+
+  const handleClearAll = () => {
+    Alert.alert('Clear History', 'Permanently delete all recordings?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Clear All',
+        style: 'destructive',
+        onPress: () => {
+          records.forEach((r) => deleteRecord(r.id))
+          loadData()
+        },
+      },
+    ])
   }
 
   const renderMurmurBar = (label: string, value: number, color: string) => (
@@ -251,20 +267,36 @@ export default function HistoryScreen() {
                       />
                     </View>
                   )}
+
                   <View style={styles.actionRow}>
-                    <TouchableOpacity
-                      style={styles.playBtn}
-                      onPress={() => playRecording(item)}
-                    >
-                      <Ionicons
-                        name={isPlaying ? 'stop' : 'play'}
-                        size={18}
-                        color='#FFF'
-                      />
-                      <Text style={styles.btnText}>
-                        {isPlaying ? 'Stop' : 'Play'}
-                      </Text>
-                    </TouchableOpacity>
+                    <View style={{ flexDirection: 'row' }}>
+                      <TouchableOpacity
+                        style={styles.playBtn}
+                        onPress={() => playRecording(item)}
+                      >
+                        <Ionicons
+                          name={isPlaying ? 'stop' : 'play'}
+                          size={18}
+                          color='#FFF'
+                        />
+                        <Text style={styles.btnText}>
+                          {isPlaying ? 'Stop' : 'Play'}
+                        </Text>
+                      </TouchableOpacity>
+
+                      {/* ADDED SHARE BUTTON BACK */}
+                      <TouchableOpacity
+                        style={styles.shareBtn}
+                        onPress={() => handleShare(item.audioUri)}
+                      >
+                        <Ionicons
+                          name='share-outline'
+                          size={20}
+                          color='#3498db'
+                        />
+                      </TouchableOpacity>
+                    </View>
+
                     <TouchableOpacity
                       onPress={() => {
                         deleteRecord(item.id)
@@ -358,6 +390,17 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     paddingHorizontal: 15,
     borderRadius: 10,
+    marginRight: 10,
+  },
+  shareBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#f0f7ff',
+    width: 40,
+    height: 40,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#d0e3ff',
   },
   btnText: { color: '#FFF', fontWeight: 'bold', marginLeft: 6 },
   empty: { color: '#ccc', fontSize: 16, marginTop: 100, textAlign: 'center' },

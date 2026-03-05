@@ -28,6 +28,7 @@ global.Buffer = Buffer
 
 const STETHO_SERVICE_UUID = '0000abcd-0000-1000-8000-00805f9b34fb'
 const AUDIO_CHAR_UUID = '00001234-0000-1000-8000-00805f9b34fb'
+const COMMAND_CHAR_UUID = '00005678-0000-1000-8000-00805f9b34fb'
 const EXPECTED_SIZE = 128000
 
 // --- ECG WAVEFORM COMPONENT ---
@@ -231,7 +232,6 @@ export default function Index() {
         if (device) {
           manager.stopDeviceScan()
           setIsScanning(false)
-          setStatus('Connecting...')
           try {
             const connected = await device.connect()
             await connected.discoverAllServicesAndCharacteristics()
@@ -243,6 +243,44 @@ export default function Index() {
           }
         }
       },
+    )
+  }
+
+  const triggerRemoteReset = async () => {
+    if (!connectedDevice) return
+    Alert.alert(
+      'Reset Hardware',
+      'Reboot stethoscope and disconnect Bluetooth?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const cmd = Buffer.from('RESET').toString('base64')
+
+              // Change "writeCharacteristicWithResponse" to "writeCharacteristicWithoutResponse"
+              await connectedDevice.writeCharacteristicWithoutResponseForService(
+                STETHO_SERVICE_UUID,
+                COMMAND_CHAR_UUID,
+                cmd,
+              )
+
+              // Since we aren't waiting for a response, we manually clean up
+              setConnectedDevice(null)
+              setStatus('Disconnected')
+              setIsTransferring(false)
+              Alert.alert('Reset Sent', 'Stethoscope is rebooting...')
+            } catch (e) {
+              Alert.alert(
+                'Error',
+                'Reset failed. Check UUID or Device connection.',
+              )
+            }
+          },
+        },
+      ],
     )
   }
 
@@ -329,7 +367,7 @@ export default function Index() {
       filteredAudioBuffer.current = filteredBuffer
 
       const finalStatus = statusRef.current.trim()
-      const finalBPM = bpmRef.current
+      const finalBPM = bpmRef.current // FIX: Grabbing BPM from Ref for accuracy
       let resultsToSave = null
 
       if (finalStatus === '1') {
@@ -366,8 +404,7 @@ export default function Index() {
   const createWavHeader = (dataLength: number, sampleRate: number) => {
     const header = Buffer.alloc(44)
     header.write('RIFF', 0)
-    // FIXED: Using standard writeUInt32LE
-    header.writeUInt32LE(36 + dataLength, 4)
+    header.writeUInt32LE(36 + dataLength, 4) // Standard Method
     header.write('WAVE', 8)
     header.write('fmt ', 12)
     header.writeUInt32LE(16, 16)
@@ -407,7 +444,7 @@ export default function Index() {
             const rawStatus = chunk[1].toString()
             const rawBPM = chunk[2]
             statusRef.current = rawStatus
-            bpmRef.current = rawBPM
+            bpmRef.current = rawBPM // Update Refs instantly
             setStatus(rawStatus)
             setRecordedBPM(rawBPM)
             return
@@ -438,7 +475,6 @@ export default function Index() {
             <ActivityIndicator size='large' color='#3498db' />
             <Text style={styles.modalTitle}>Processing Recording</Text>
             <Text style={styles.modalSubtitle}>{uiMessage}</Text>
-            {/* FIXED: View instead of div */}
             <View style={styles.modalProgressContainer}>
               <View
                 style={[
@@ -450,6 +486,14 @@ export default function Index() {
             <Text style={styles.modalPercentage}>
               {Math.round(progress * 100)}%
             </Text>
+
+            <TouchableOpacity
+              onPress={triggerRemoteReset}
+              style={styles.modalResetBtn}
+            >
+              <Ionicons name='refresh-circle' size={20} color='#ff4444' />
+              <Text style={styles.modalResetText}>Stuck? Emergency Reset</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -472,6 +516,17 @@ export default function Index() {
             </Text>
           </View>
           <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+            {connectedDevice && (
+              <TouchableOpacity
+                onPress={triggerRemoteReset}
+                style={[
+                  styles.connectButton,
+                  { backgroundColor: '#FF3B30', marginRight: 10 },
+                ]}
+              >
+                <Ionicons name='refresh' size={16} color='#FFF' />
+              </TouchableOpacity>
+            )}
             {!connectedDevice && (
               <TouchableOpacity
                 onPress={connectHardware}
@@ -914,6 +969,21 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: 'bold',
     marginTop: 10,
+  },
+  modalResetBtn: {
+    marginTop: 30,
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 10,
+    borderWidth: 1,
+    borderColor: '#333',
+    borderRadius: 12,
+  },
+  modalResetText: {
+    color: '#ff4444',
+    fontSize: 12,
+    fontWeight: '600',
+    marginLeft: 8,
   },
   timeRow: {
     flexDirection: 'row',
