@@ -231,7 +231,7 @@ export default function HistoryScreen() {
                         Murmur Classification
                       </Text>
                       {renderMurmurBar(
-                        'Early Murmur',
+                        'Early Systolic',
                         item.earlyMurmur,
                         '#3498db',
                       )}
@@ -241,7 +241,7 @@ export default function HistoryScreen() {
                         '#e67e22',
                       )}
                       {renderMurmurBar(
-                        'Mid/Late',
+                        'Mid/Late Systolic',
                         item.midLateMurmur,
                         '#e74c3c',
                       )}
